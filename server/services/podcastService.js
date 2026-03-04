@@ -58,21 +58,45 @@ async function extractAudioUrl(url) {
 
         // Apple Podcasts链接处理
         if (url.includes('podcasts.apple.com')) {
-            return await extractApplePodcastAudio(url);
+            const result = await extractApplePodcastAudio(url);
+            return normalizePodcastInfo(result, url);
         }
 
         // 小宇宙链接处理
         if (url.includes('xiaoyuzhoufm.com') || url.includes('小宇宙')) {
-            return await extractXiaoyuzhouAudio(url);
+            const result = await extractXiaoyuzhouAudio(url);
+            return normalizePodcastInfo(result, url);
         }
 
         // 通用RSS/播客平台处理
-        return await extractGenericPodcastAudio(url);
+        const result = await extractGenericPodcastAudio(url);
+        return normalizePodcastInfo(result, url);
 
     } catch (error) {
         console.error('提取音频URL错误:', error);
         throw error;
     }
+}
+
+/**
+ * 统一解析结果结构，兼容历史分支返回 string 的情况
+ * @param {Object|string} result
+ * @param {string} sourceUrl
+ * @returns {{audioUrl: string, title: string, description: string}|null}
+ */
+function normalizePodcastInfo(result, sourceUrl) {
+    if (!result) return null;
+
+    if (typeof result === 'string') {
+        const fallbackName = sourceUrl || result;
+        return {
+            audioUrl: result,
+            title: path.basename(fallbackName, path.extname(fallbackName)) || 'Untitled Podcast',
+            description: ''
+        };
+    }
+
+    return result;
 }
 
 /**
