@@ -190,20 +190,43 @@ async function processPodcast(event) {
     showResults();
     showLoadingWithProgress();
     
-    // 建立SSE连接接收进度更新
+    // 建立SSE连接接收进度更新，等待连接确认后再发POST请求
     let eventSource = null;
-    try {
-        eventSource = new EventSource(`/api/progress/${sessionId}`);
-        setupProgressListener(eventSource);
-    } catch (sseError) {
-        console.warn('SSE连接失败，使用模拟进度:', sseError);
-    }
-    
+
+    await new Promise((resolve) => {
+        try {
+            eventSource = new EventSource(`/api/progress/${sessionId}`);
+            const timeout = setTimeout(() => {
+                console.warn('SSE连接超时，继续处理');
+                resolve();
+            }, 3000);
+            eventSource.addEventListener('message', (e) => {
+                try {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'connected') {
+                        clearTimeout(timeout);
+                        console.log('✅ SSE连接已确认，开始发送请求');
+                        resolve();
+                    }
+                } catch {}
+            });
+            eventSource.onerror = () => {
+                clearTimeout(timeout);
+                console.warn('SSE连接失败，使用模拟进度');
+                resolve();
+            };
+            setupProgressListener(eventSource);
+        } catch (sseError) {
+            console.warn('SSE连接失败，使用模拟进度:', sseError);
+            resolve();
+        }
+    });
+
     try {
         // 调用后端API，设置15分钟超时
         const controller = new AbortController();
         // 移除超时限制以支持长音频处理
-        
+
         // 步骤1: 先获取音频时长估算，带进度反馈
         let estimatedDuration = null;
         
