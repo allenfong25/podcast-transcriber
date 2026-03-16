@@ -1,7 +1,8 @@
 const OpenAI = require('openai');
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execFileSync } = require('child_process');
 const { promisify } = require('util');
 
 const execAsync = promisify(exec);
@@ -146,6 +147,69 @@ function resolveTranscriptMetadata(transcriptPath, rawContent) {
     }
 
     return currentMetadata;
+}
+
+function isLikelyPlaceholderTitle(title = '') {
+    const normalized = String(title).trim();
+    if (!normalized) return true;
+
+    return /^Untitled/i.test(normalized) ||
+        /^[0-9a-f]{24,}$/i.test(normalized) ||
+        /^[0-9a-z]{20,}$/i.test(normalized.replace(/[\s_-]/g, ''));
+}
+
+function fetchPageHtmlWithCurl(url) {
+    return execFileSync('python3', [
+        '-c',
+        "import sys, requests; print(requests.get(sys.argv[1], headers={'User-Agent':'Mozilla/5.0'}, timeout=20).text)",
+        url
+    ], {
+        encoding: 'utf8',
+        timeout: 25000,
+        maxBuffer: 1024 * 1024 * 20
+    });
+}
+
+async function enrichPodcastTitleFromSource(sourceUrl, fallbackTitle) {
+    if (!sourceUrl || !sourceUrl.includes('xiaoyuzhoufm.com')) {
+        return fallbackTitle;
+    }
+
+    try {
+        let pageHtml;
+        try {
+            const response = await axios.get(sourceUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+                },
+                timeout: 15000
+            });
+            pageHtml = response.data;
+        } catch (axiosError) {
+            if (axiosError.response?.status === 403) {
+                pageHtml = fetchPageHtmlWithCurl(sourceUrl);
+            } else {
+                throw axiosError;
+            }
+        }
+
+        const ogTitleMatch = pageHtml.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
+        if (ogTitleMatch && ogTitleMatch[1].trim()) {
+            return ogTitleMatch[1].trim();
+        }
+
+        const jsonLdMatch = pageHtml.match(/<script[^>]*type="application\/ld\+json"[^>]*>(.*?)<\/script>/s);
+        if (jsonLdMatch) {
+            const jsonLd = JSON.parse(jsonLdMatch[1]);
+            if (jsonLd.name && String(jsonLd.name).trim()) {
+                return String(jsonLd.name).trim();
+            }
+        }
+    } catch (error) {
+        console.warn(`⚠️ 根据 source 回查播客标题失败: ${error.message}`);
+    }
+
+    return fallbackTitle;
 }
 
 // 本地Whisper转录配置
@@ -1790,8 +1854,11 @@ async function generateReportFromTranscriptFile(transcriptPath, outputLanguage =
         throw new Error('transcript 内容为空，无法生成报告');
     }
 
-    const finalTitle = podcastTitle || metadata.podcastTitle || 'Untitled Podcast';
+    const initialTitle = podcastTitle || metadata.podcastTitle || 'Untitled Podcast';
     const finalSourceUrl = sourceUrl || metadata.sourceUrl || null;
+    const finalTitle = isLikelyPlaceholderTitle(initialTitle)
+        ? await enrichPodcastTitleFromSource(finalSourceUrl, initialTitle)
+        : initialTitle;
     const summary = await generateSummary(transcript, outputLanguage);
 
     const outputDir = tempDir || path.dirname(transcriptPath);

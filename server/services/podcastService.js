@@ -1,7 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { parseRSSFeed, discoverRSSFromPage, getXiaoyuzhouRSS } = require('./rssParser');
 
 /**
@@ -97,6 +97,90 @@ function normalizePodcastInfo(result, sourceUrl) {
     }
 
     return result;
+}
+
+function decodeHtmlEntities(text = '') {
+    return String(text)
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .trim();
+}
+
+function cleanPodcastTitle(title = '') {
+    return decodeHtmlEntities(title)
+        .replace(/\s*\|\s*小宇宙.*$/i, '')
+        .replace(/\s*-\s*小宇宙.*$/i, '')
+        .replace(/^听《(.+?)》上小宇宙。?$/i, '$1')
+        .trim();
+}
+
+
+function fetchPageHtmlWithCurl(url) {
+    return execFileSync('python3', [
+        '-c',
+        "import sys, requests; print(requests.get(sys.argv[1], headers={'User-Agent':'Mozilla/5.0'}, timeout=20).text)",
+        url
+    ], {
+        encoding: 'utf8',
+        timeout: 25000,
+        maxBuffer: 1024 * 1024 * 20
+    });
+}
+
+function parseXiaoyuzhouPageMetadata(html) {
+    const metadata = {
+        audioUrl: null,
+        title: null,
+        description: '',
+        podcastName: null
+    };
+
+    const ogAudioMatch = html.match(/<meta\s+property="og:audio"\s+content="([^"]+)"/i);
+    if (ogAudioMatch) {
+        metadata.audioUrl = ogAudioMatch[1];
+    }
+
+    const ogTitleMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
+    if (ogTitleMatch && ogTitleMatch[1].trim()) {
+        metadata.title = cleanPodcastTitle(ogTitleMatch[1]);
+    }
+
+    const ogDescriptionMatch = html.match(/<meta\s+(?:name="description"|property="og:description")[^>]*content="([^"]+)"/i);
+    if (ogDescriptionMatch && ogDescriptionMatch[1].trim()) {
+        metadata.description = decodeHtmlEntities(ogDescriptionMatch[1]);
+    }
+
+    const jsonLdMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>(.*?)<\/script>/gs) || [];
+    for (const jsonLdMatch of jsonLdMatches) {
+        const jsonText = jsonLdMatch.replace(/<script[^>]*>/, '').replace(/<\/script>/, '').trim();
+        try {
+            const jsonLd = JSON.parse(jsonText);
+            if (!metadata.title && jsonLd.name) {
+                metadata.title = cleanPodcastTitle(jsonLd.name);
+            }
+            if (!metadata.description && jsonLd.description) {
+                metadata.description = jsonLd.description.trim();
+            }
+            if (!metadata.audioUrl && jsonLd.associatedMedia?.contentUrl) {
+                metadata.audioUrl = jsonLd.associatedMedia.contentUrl;
+            }
+            if (jsonLd.partOfSeries?.name) {
+                metadata.podcastName = cleanPodcastTitle(jsonLd.partOfSeries.name);
+            }
+        } catch (error) {
+            // ignore malformed json-ld blocks
+        }
+    }
+
+    const titleTagMatch = html.match(/<title>(.*?)<\/title>/i);
+    if (!metadata.title && titleTagMatch && titleTagMatch[1].trim()) {
+        metadata.title = cleanPodcastTitle(titleTagMatch[1]);
+    }
+
+    return metadata;
 }
 
 /**
@@ -353,34 +437,38 @@ async function extractFromApplePodcastsPage(url) {
  */
 async function extractXiaoyuzhouAudio(url) {
     try {
-        console.log('处理小宇宙链接（RSS解析）...');
-        
-        // 方法1: 直接从网页抓取音频链接（替代需要认证的API）
+        console.log('处理小宇宙链接（网页 + RSS解析）...');
+
+        // 方法1: 直接从网页抓取音频链接和标题（优先）
         try {
-            console.log('从小宇宙网页抓取音频链接...');
-            const pageResponse = await axios.get(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                },
-                timeout: 15000
-            });
-            
-            // 从og:audio meta标签提取音频链接
-            const ogAudioMatch = pageResponse.data.match(/<meta\s+property="og:audio"\s+content="([^"]+)"/);
-            if (ogAudioMatch) {
-                const audioUrl = ogAudioMatch[1];
-                console.log('从小宇宙网页og:audio成功获取到音频链接');
-                return audioUrl;
+            console.log('从小宇宙网页抓取音频链接和标题...');
+            let pageHtml;
+            try {
+                const pageResponse = await axios.get(url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+                    },
+                    timeout: 15000
+                });
+                pageHtml = pageResponse.data;
+            } catch (axiosError) {
+                if (axiosError.response?.status === 403) {
+                    console.log('小宇宙网页直连被拒绝，回退到 Python 抓取...');
+                    pageHtml = fetchPageHtmlWithCurl(url);
+                } else {
+                    throw axiosError;
+                }
             }
-            
-            // 备用方案：从JSON-LD结构化数据提取
-            const jsonLdMatch = pageResponse.data.match(/"contentUrl":"([^"]+\.m4a)"/);
-            if (jsonLdMatch) {
-                const audioUrl = jsonLdMatch[1];
-                console.log('从小宇宙JSON-LD数据获取到音频链接');
-                return audioUrl;
+
+            const metadata = parseXiaoyuzhouPageMetadata(pageHtml);
+            if (metadata.audioUrl) {
+                console.log(`从小宇宙网页成功获取到音频链接，标题: ${metadata.title || 'Unknown'}`);
+                return {
+                    audioUrl: metadata.audioUrl,
+                    title: metadata.title || metadata.podcastName || 'Untitled Episode',
+                    description: metadata.description || ''
+                };
             }
-            
         } catch (pageError) {
             console.log('小宇宙网页抓取失败，尝试其他方法:', pageError.message);
         }
@@ -392,7 +480,12 @@ async function extractXiaoyuzhouAudio(url) {
                 const audioItems = await parseRSSFeed(rssUrl);
                 if (audioItems && audioItems.length > 0) {
                     console.log('从小宇宙RSS获取到音频链接');
-                    return audioItems[0].audioUrl; // 返回第一个音频项目
+                    const firstItem = audioItems[0];
+                    return {
+                        audioUrl: firstItem.audioUrl,
+                        title: cleanPodcastTitle(firstItem.title || 'Untitled Episode'),
+                        description: firstItem.description || ''
+                    };
                 }
             }
         } catch (rssError) {
@@ -406,14 +499,18 @@ async function extractXiaoyuzhouAudio(url) {
                 const audioItems = await parseRSSFeed(discoveredRSS);
                 if (audioItems && audioItems.length > 0) {
                     console.log('从发现的RSS获取到音频链接');
-                    return audioItems[0].audioUrl;
+                    const firstItem = audioItems[0];
+                    return {
+                        audioUrl: firstItem.audioUrl,
+                        title: cleanPodcastTitle(firstItem.title || 'Untitled Episode'),
+                        description: firstItem.description || ''
+                    };
                 }
             }
         } catch (discoverError) {
             console.log('RSS发现失败:', discoverError.message);
         }
 
-        // 所有解析方法都失败了
         throw new Error('无法从小宇宙获取音频链接，请检查链接是否有效');
 
     } catch (error) {
