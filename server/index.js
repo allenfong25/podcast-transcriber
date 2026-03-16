@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const { processAudioWithOpenAI } = require('./services/openaiService');
@@ -11,6 +12,7 @@ const { downloadPodcastAudio } = require('./services/podcastService');
 const { getAudioFiles, estimateAudioDuration } = require('./services/audioInfoService');
 const { cleanupAudioFiles } = require('./utils/fileSaver');
 const { formatSizeKB, formatSizeMB, estimateAudioDurationFromSize } = require('./utils/formatUtils');
+const logger = require('./utils/logger');
 
 const app = express();
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
@@ -22,6 +24,29 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // 静态文件服务
 app.use(express.static(path.join(__dirname, '../public')));
+
+app.use((req, res, next) => {
+    req.requestId = crypto.randomUUID();
+    req.startTime = Date.now();
+
+    logger.info('request_started', {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl
+    });
+
+    res.on('finish', () => {
+        logger.info('request_finished', {
+            requestId: req.requestId,
+            method: req.method,
+            path: req.originalUrl,
+            statusCode: res.statusCode,
+            durationMs: Date.now() - req.startTime
+        });
+    });
+
+    next();
+});
 
 // 创建临时文件夹
 const tempDir = path.join(__dirname, 'temp');
@@ -92,6 +117,15 @@ app.post('/api/process-podcast', async (req, res) => {
         const { url, operation, audioLanguage, outputLanguage, sessionId } = req.body;
 
         console.log('处理播客请求:', {
+            url,
+            operation,
+            audioLanguage,
+            outputLanguage,
+            sessionId,
+            requestId: req.requestId
+        });
+        logger.info('process_podcast_requested', {
+            requestId: req.requestId,
             url,
             operation,
             audioLanguage,
@@ -192,9 +226,21 @@ app.post('/api/process-podcast', async (req, res) => {
     } catch (error) {
         console.error('处理播客时出错:', error);
         
+        logger.error('process_podcast_failed', error, {
+            requestId: req.requestId,
+            body: {
+                url: req.body?.url,
+                operation: req.body?.operation,
+                audioLanguage: req.body?.audioLanguage,
+                outputLanguage: req.body?.outputLanguage,
+                sessionId: req.body?.sessionId
+            }
+        });
+
         res.status(500).json({
             success: false,
-            error: error.message || '服务器内部错误 / Internal server error'
+            error: error.message || '服务器内部错误 / Internal server error',
+            requestId: req.requestId
         });
     }
 });
@@ -258,9 +304,15 @@ app.post('/api/process-local-file', async (req, res) => {
         
     } catch (error) {
         console.error('本地文件处理失败:', error);
+        logger.error('process_local_file_failed', error, {
+            requestId: req.requestId,
+            body: req.body
+        });
+
         res.status(500).json({
             success: false,
-            error: error.message || '本地文件处理失败'
+            error: error.message || '本地文件处理失败',
+            requestId: req.requestId
         });
     }
 });
@@ -403,9 +455,15 @@ app.post('/api/estimate-duration', async (req, res) => {
 // 错误处理中间件
 app.use((error, req, res, next) => {
     console.error('未处理的错误:', error);
+    logger.error('unhandled_request_error', error, {
+        requestId: req?.requestId,
+        method: req?.method,
+        path: req?.originalUrl
+    });
     res.status(500).json({
         success: false,
-        error: '服务器内部错误 / Internal server error'
+        error: '服务器内部错误 / Internal server error',
+        requestId: req?.requestId
     });
 });
 
@@ -456,3 +514,11 @@ function startServer() {
 }
 
 startServer();
+
+process.on('uncaughtException', (error) => {
+    logger.error('uncaught_exception', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+    logger.error('unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
+});
