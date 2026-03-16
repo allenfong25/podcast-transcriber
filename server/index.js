@@ -248,7 +248,12 @@ app.post('/api/process-podcast', async (req, res) => {
 // 本地文件处理端点
 app.post('/api/process-local-file', async (req, res) => {
     try {
-        const { filename, operation = 'transcribe_only', outputLanguage = 'zh' } = req.body;
+        const {
+            filename,
+            operation = 'transcribe_only',
+            outputLanguage = 'zh',
+            audioLanguage = 'auto'
+        } = req.body;
         
         if (!filename) {
             return res.status(400).json({

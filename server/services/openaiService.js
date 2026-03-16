@@ -6,6 +6,25 @@ const { promisify } = require('util');
 
 const execAsync = promisify(exec);
 
+function getCompatibleTemperature(model, requestedTemperature) {
+    if (!model) return requestedTemperature;
+
+    const normalizedModel = String(model).toLowerCase();
+    if (normalizedModel.includes('kimi')) {
+        return 1;
+    }
+
+    return requestedTemperature;
+}
+
+async function createChatCompletion(options) {
+    const request = { ...options };
+    if (Object.prototype.hasOwnProperty.call(request, 'temperature')) {
+        request.temperature = getCompatibleTemperature(request.model, request.temperature);
+    }
+    return openai.chat.completions.create(request);
+}
+
 /**
  * 生成标准化的文件名
  * @param {string} type - 文件类型 (raw, transcript, summary, translation)
@@ -143,8 +162,13 @@ async function processAudioWithOpenAI(audioFiles, shouldSummarize = false, outpu
             let optimizationSuccess = false;
             
             // 发送优化阶段进度
-            if (sendProgressCallback) {
-                sendProgressCallback(50, 'optimizing', outputLanguage === 'zh' ? '优化转录文本' : 'Optimizing transcript');
+            if (sessionId && sendProgressCallback) {
+                sendProgressCallback(
+                    sessionId,
+                    50,
+                    'optimizing',
+                    outputLanguage === 'zh' ? '优化转录文本' : 'Optimizing transcript'
+                );
             }
             
             for (let retryCount = 0; retryCount < 3; retryCount++) {
@@ -314,7 +338,7 @@ async function processAudioWithOpenAI(audioFiles, shouldSummarize = false, outpu
  * @param {string} outputLanguage - 总结输出语言（不影响转录语言）
  * @returns {Promise<string>} - 优化后的完整转录文本
  */
-async function transcribeMultipleAudios(audioFiles, outputLanguage, shouldSaveDirectly = false, tempDir = null) {
+async function transcribeMultipleAudios(audioFiles, outputLanguage, shouldSaveDirectly = false, tempDir = null, originalUrl = null) {
     try {
         console.log(`🔄 开始串行转录 ${audioFiles.length} 个音频片段（避免API过载）...`);
         
@@ -609,7 +633,7 @@ ${rawTranscript}` :
 Original transcript text:
 ${rawTranscript}`;
 
-        const response = await openai.chat.completions.create({
+        const response = await createChatCompletion({
             model: AI_MODEL_FAST,
             messages: [
                 {
@@ -688,7 +712,7 @@ Requirements:
 
 Please output the optimized text directly in the original language without any explanations or annotations.`;
 
-        const response = await openai.chat.completions.create({
+        const response = await createChatCompletion({
             model: AI_MODEL,
             messages: [
                 { role: "system", content: systemPrompt },
@@ -862,7 +886,7 @@ Bitte erstellen Sie eine strukturierte Zusammenfassung des Podcast-Inhalts mit S
 async function generateDirectSummary(transcript, outputLanguage) {
     const systemPrompt = getSystemPromptByLanguage(outputLanguage);
 
-        const response = await openai.chat.completions.create({
+        const response = await createChatCompletion({
             model: AI_MODEL,
             messages: [
                 { role: "system", content: systemPrompt },
@@ -1034,7 +1058,7 @@ Dies ist ein Teil eines Podcasts, bitte erstellen Sie eine Zusammenfassung der S
 async function generateChunkSummary(chunkText, outputLanguage) {
     const systemPrompt = getChunkSummaryPrompt(outputLanguage);
 
-    const response = await openai.chat.completions.create({
+    const response = await createChatCompletion({
         model: AI_MODEL,
         messages: [
             { role: "system", content: systemPrompt },
@@ -1126,7 +1150,7 @@ Bitte organisieren Sie als strukturierte Podcast-Zusammenfassung:`
 async function generateFinalSummary(combinedSummary, outputLanguage) {
     const systemPrompt = getFinalSummaryPrompt(outputLanguage);
 
-    const response = await openai.chat.completions.create({
+    const response = await createChatCompletion({
                 model: AI_MODEL,
                 messages: [
             { role: "system", content: systemPrompt },
@@ -1203,7 +1227,7 @@ ${chunkText}` :
 Original transcript text:
 ${chunkText}`;
 
-        const response = await openai.chat.completions.create({
+        const response = await createChatCompletion({
             model: AI_MODEL_FAST,
             messages: [
                 {
@@ -1666,7 +1690,7 @@ async function translateDirect(transcript, sourceName, targetName) {
 原文内容：
 ${transcript}`;
 
-    const response = await openai.chat.completions.create({
+    const response = await createChatCompletion({
         model: AI_MODEL,
         messages: [
             {
