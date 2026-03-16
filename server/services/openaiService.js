@@ -83,6 +83,71 @@ ${summary}${sourceSection}
 `;
 }
 
+function stripMarkdownTitle(rawTitle) {
+    if (!rawTitle) return null;
+
+    return rawTitle
+        .replace(/^#+\s*/, '')
+        .replace(/^[^\p{L}\p{N}\u4e00-\u9fa5]+/u, '')
+        .trim() || null;
+}
+
+function inferTitleFromFilename(filename) {
+    if (!filename) return 'Untitled Podcast';
+
+    const basename = path.basename(filename, path.extname(filename));
+    const normalized = basename
+        .replace(/_(transcript|summary|translation|original)$/i, '')
+        .replace(/^(raw|report|summary|translation)_/i, '')
+        .replace(/_[A-Z0-9]{6,}$/i, '')
+        .replace(/_/g, ' ')
+        .trim();
+
+    return normalized || 'Untitled Podcast';
+}
+
+function extractTranscriptMetadata(content = '', filename = '') {
+    const normalizedContent = String(content).replace(/\r\n/g, '\n').trim();
+    const sourceMatch = normalizedContent.match(/\*\*Source:\*\*\s*(.+)$/m);
+    const headingMatch = normalizedContent.match(/^#\s+(.+)$/m);
+
+    let transcriptText = normalizedContent;
+
+    if (headingMatch) {
+        transcriptText = transcriptText.replace(/^#\s+.+\n+/, '').trim();
+    }
+
+    if (sourceMatch) {
+        transcriptText = transcriptText.replace(/\n*---\n*\n?\*\*Source:\*\*\s*.+$/m, '').trim();
+    }
+
+    return {
+        transcriptText,
+        podcastTitle: stripMarkdownTitle(headingMatch ? headingMatch[1] : '') || inferTitleFromFilename(filename),
+        sourceUrl: sourceMatch ? sourceMatch[1].trim() : null
+    };
+}
+
+function resolveTranscriptMetadata(transcriptPath, rawContent) {
+    const currentMetadata = extractTranscriptMetadata(rawContent, transcriptPath);
+    if (currentMetadata.sourceUrl) {
+        return currentMetadata;
+    }
+
+    const backupPath = transcriptPath.replace(/\.md$/i, '_original.md');
+    if (!backupPath.endsWith('_original_original.md') && fs.existsSync(backupPath)) {
+        const backupContent = fs.readFileSync(backupPath, 'utf8');
+        const backupMetadata = extractTranscriptMetadata(backupContent, backupPath);
+        return {
+            transcriptText: currentMetadata.transcriptText || backupMetadata.transcriptText,
+            podcastTitle: currentMetadata.podcastTitle || backupMetadata.podcastTitle,
+            sourceUrl: backupMetadata.sourceUrl || currentMetadata.sourceUrl
+        };
+    }
+
+    return currentMetadata;
+}
+
 // 本地Whisper转录配置
 const WHISPER_MODEL = process.env.WHISPER_MODEL || 'base'; // Whisper模型大小
 console.log(`🎤 转录模式: 本地Faster-Whisper`);
@@ -1708,6 +1773,51 @@ ${transcript}`;
 /**
  * 分块翻译（适用于长文本）
  */
+async function generateReportFromTranscriptFile(transcriptPath, outputLanguage = 'zh', tempDir = null, podcastTitle = null, sourceUrl = null) {
+    if (!transcriptPath) {
+        throw new Error('缺少 transcript 文件路径');
+    }
+
+    if (!fs.existsSync(transcriptPath)) {
+        throw new Error('transcript 文件不存在');
+    }
+
+    const rawContent = fs.readFileSync(transcriptPath, 'utf8');
+    const metadata = resolveTranscriptMetadata(transcriptPath, rawContent);
+    const transcript = metadata.transcriptText;
+
+    if (!transcript || !transcript.trim()) {
+        throw new Error('transcript 内容为空，无法生成报告');
+    }
+
+    const finalTitle = podcastTitle || metadata.podcastTitle || 'Untitled Podcast';
+    const finalSourceUrl = sourceUrl || metadata.sourceUrl || null;
+    const summary = await generateSummary(transcript, outputLanguage);
+
+    const outputDir = tempDir || path.dirname(transcriptPath);
+    const transcriptBaseName = path.basename(transcriptPath, path.extname(transcriptPath));
+    const reportFileName = `report_${transcriptBaseName}_summary.md`;
+    const reportPath = path.join(outputDir, reportFileName);
+    const markdownSummary = formatSummaryAsMarkdown(summary, finalTitle, outputLanguage, finalSourceUrl);
+
+    fs.writeFileSync(reportPath, markdownSummary, 'utf8');
+
+    return {
+        transcript,
+        summary,
+        podcastTitle: finalTitle,
+        sourceUrl: finalSourceUrl,
+        savedFiles: [
+            {
+                type: 'summary',
+                filename: reportFileName,
+                path: reportPath,
+                size: fs.statSync(reportPath).size
+            }
+        ]
+    };
+}
+
 async function translateInChunks(transcript, sourceName, targetName) {
     console.log(`📄 文本过长 (${transcript.length} 字符)，使用智能分块翻译策略`);
     
@@ -1787,6 +1897,7 @@ module.exports = {
     formatTranslationAsMarkdown,
     optimizeTranscriptContinuity,
     generateSummary,
+    generateReportFromTranscriptFile,
     translateTranscript,
     needsTranslation
 };

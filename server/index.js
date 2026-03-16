@@ -7,7 +7,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 require('dotenv').config();
 
-const { processAudioWithOpenAI } = require('./services/openaiService');
+const { processAudioWithOpenAI, generateReportFromTranscriptFile } = require('./services/openaiService');
 const { downloadPodcastAudio } = require('./services/podcastService');
 const { getAudioFiles, estimateAudioDuration } = require('./services/audioInfoService');
 const { cleanupAudioFiles } = require('./utils/fileSaver');
@@ -317,6 +317,68 @@ app.post('/api/process-local-file', async (req, res) => {
         res.status(500).json({
             success: false,
             error: error.message || '本地文件处理失败',
+            requestId: req.requestId
+        });
+    }
+});
+
+// 从已有 transcript 直接生成报告
+app.post('/api/generate-report-from-transcript', async (req, res) => {
+    try {
+        const { filename, outputLanguage = 'zh', podcastTitle = null, sourceUrl = null } = req.body;
+
+        if (!filename) {
+            return res.status(400).json({
+                success: false,
+                error: '缺少 transcript 文件名参数'
+            });
+        }
+
+        const transcriptPath = path.resolve(tempDir, filename);
+
+        if (!transcriptPath.startsWith(tempDir)) {
+            return res.status(400).json({
+                success: false,
+                error: '无效的文件路径'
+            });
+        }
+
+        if (!fs.existsSync(transcriptPath)) {
+            return res.status(404).json({
+                success: false,
+                error: 'transcript 文件未找到'
+            });
+        }
+
+        console.log(`📝 从已有 transcript 生成报告: ${filename}`);
+        logger.info('generate_report_from_transcript_requested', {
+            requestId: req.requestId,
+            filename,
+            outputLanguage
+        });
+
+        const result = await generateReportFromTranscriptFile(
+            transcriptPath,
+            outputLanguage,
+            tempDir,
+            podcastTitle,
+            sourceUrl
+        );
+
+        res.json({
+            success: true,
+            data: result
+        });
+    } catch (error) {
+        console.error('从 transcript 生成报告失败:', error);
+        logger.error('generate_report_from_transcript_failed', error, {
+            requestId: req.requestId,
+            body: req.body
+        });
+
+        res.status(500).json({
+            success: false,
+            error: error.message || '从 transcript 生成报告失败',
             requestId: req.requestId
         });
     }
